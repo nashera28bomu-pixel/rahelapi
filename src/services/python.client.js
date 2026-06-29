@@ -1,17 +1,8 @@
 /**
  * @file services/python.client.js
- * @description Node.js ↔ Python bridge client.
- *
- * The moviebox-api is a Python library, not a REST API.
- * This client spawns the Python bridge script as a child process,
- * sends a JSON command via stdin, and reads the JSON response from stdout.
- *
- * Architecture:
- *   Node.js → [JSON command over stdin] → Python bridge.py → moviebox-api
- *   Node.js ← [JSON response over stdout] ← Python bridge.py
- *
- * This isolates ALL Python-specific logic from the Node.js application.
- * If we ever move to a REST-based provider, only this file needs to change.
+ * @description Node.js → Python bridge client.
+ * Spawns bridge.py as a child process with PYTHONPATH set to ./python_modules
+ * so moviebox_api is always found regardless of where pip installed it.
  */
 
 import { spawn } from 'child_process';
@@ -22,98 +13,70 @@ import { ApiError } from '../utils/errors.js';
 import logger from '../utils/logger.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const BRIDGE_PATH = path.resolve(__dirname, '../../', env.python.bridgePath);
+const PROJECT_ROOT = path.resolve(__dirname, '../../');
+const BRIDGE_PATH = path.join(PROJECT_ROOT, env.python.bridgePath);
+const PYTHON_MODULES = path.join(PROJECT_ROOT, 'python_modules');
 
 /**
  * Call the Python bridge with an action and parameters.
- * Spawns a Python child process, sends a JSON command, and parses the response.
- *
- * @param {string} action - The action key (e.g. 'search', 'movie_details')
- * @param {object} params - Parameters for the action
- * @returns {Promise<any>} The parsed `data` field from the Python response
- * @throws {ApiError} On Python errors, timeouts, or malformed responses
+ * @param {string} action
+ * @param {object} params
+ * @returns {Promise<any>}
  */
 const callPython = (action, params = {}) => {
   return new Promise((resolve, reject) => {
     const command = JSON.stringify({ action, params });
 
-    logger.debug(`[PythonClient] Spawning bridge: action=${action}`);
+    logger.debug(`[PythonClient] action=${action}`);
 
     const proc = spawn(env.python.cmd, [BRIDGE_PATH], {
       stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        // Tell Python exactly where our installed packages are
+        PYTHONPATH: PYTHON_MODULES,
+      },
     });
 
     let stdout = '';
     let stderr = '';
 
-    // Timeout guard — kill the process if it takes too long
     const timer = setTimeout(() => {
       proc.kill('SIGTERM');
-      reject(
-        new ApiError(
-          504,
-          `Python bridge timed out after ${env.python.timeout}ms for action: ${action}`
-        )
-      );
+      reject(new ApiError(504, `Python bridge timed out after ${env.python.timeout}ms`));
     }, env.python.timeout);
 
-    // Collect stdout
-    proc.stdout.on('data', (chunk) => {
-      stdout += chunk.toString();
-    });
+    proc.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+    proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
 
-    // Collect stderr (Python errors / tracebacks)
-    proc.stderr.on('data', (chunk) => {
-      stderr += chunk.toString();
-    });
-
-    // Process finished
     proc.on('close', (code) => {
       clearTimeout(timer);
 
-      if (stderr) {
-        logger.warn(`[PythonClient] stderr from action=${action}:\n${stderr.trim()}`);
-      }
+      if (stderr) logger.warn(`[PythonClient] stderr:\n${stderr.trim()}`);
 
       if (code !== 0 && !stdout) {
-        return reject(
-          new ApiError(
-            502,
-            `Python bridge exited with code ${code} for action: ${action}`
-          )
-        );
+        return reject(new ApiError(502, `Python bridge exited with code ${code}`));
       }
 
       let parsed;
       try {
         parsed = JSON.parse(stdout.trim());
       } catch {
-        return reject(
-          new ApiError(502, `Python bridge returned invalid JSON for action: ${action}`)
-        );
+        return reject(new ApiError(502, `Python bridge returned invalid JSON`));
       }
 
       if (!parsed.success) {
-        return reject(
-          new ApiError(502, parsed.error || `Python bridge failed for action: ${action}`)
-        );
+        return reject(new ApiError(502, parsed.error || `Python bridge failed`));
       }
 
-      logger.debug(`[PythonClient] Success: action=${action}`);
       resolve(parsed.data);
     });
 
     proc.on('error', (err) => {
       clearTimeout(timer);
-      reject(
-        new ApiError(
-          502,
-          `Failed to spawn Python process: ${err.message}. Is Python installed?`
-        )
-      );
+      reject(new ApiError(502, `Failed to spawn Python: ${err.message}`));
     });
 
-    // Send the command via stdin and close it
     proc.stdin.write(command);
     proc.stdin.end();
   });
