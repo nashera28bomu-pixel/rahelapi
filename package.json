@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "setup:python": "PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 pip install 'pydantic==2.9.2' 'pydantic-core==2.23.4' --no-build-isolation && pip install moviebox-api --no-deps && pip install rich click bs4 httpx throttlebuster"
+    "setup:python": "PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 pip install 'pydantic==2.9.2' 'pydantic-core==2.23.4' --no-build-isolation --break-system-packages && pip install moviebox-api --no-deps --break-system-packages && pip install rich click bs4 httpx throttlebuster --break-system-packages"
   },
   "keywords": [
     "cymor",
