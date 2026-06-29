@@ -1,14 +1,13 @@
 {
   "name": "cymor-movie-api",
   "version": "1.0.0",
-  "description": "Production-ready backend API powering Cymor Movie Hub — a premium streaming platform for movies, TV series, and anime.",
+  "description": "Production-ready backend API powering Cymor Movie Hub.",
   "main": "src/server.js",
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "setup:python": "PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 pip3 install 'pydantic==2.9.2' 'pydantic-core==2.23.4' --no-build-isolation --user --break-system-packages && pip3 install moviebox-api --no-deps --user --break-system-packages && pip3 install rich click bs4 httpx throttlebuster --user --break-system-packages",
-    "build": "npm run setup:python"
+    "build": "PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 pip3 install 'pydantic==2.9.2' 'pydantic-core==2.23.4' --no-build-isolation --target=./python_modules --break-system-packages && pip3 install moviebox-api --no-deps --target=./python_modules --break-system-packages && pip3 install rich click bs4 httpx throttlebuster --target=./python_modules --break-system-packages"
   },
   "keywords": ["cymor", "movie-api", "streaming", "moviebox", "kenya"],
   "author": "Legendary Smiley Cymor <cymortechservices@gmail.com>",
