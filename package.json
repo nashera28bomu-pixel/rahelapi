@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "setup:python": "PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 /opt/render/project/src/.venv/bin/pip install 'pydantic==2.9.2' 'pydantic-core==2.23.4' --no-build-isolation && /opt/render/project/src/.venv/bin/pip install moviebox-api --no-deps && /opt/render/project/src/.venv/bin/pip install rich click bs4 httpx throttlebuster"
+    "setup:python": "PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 pip3 install 'pydantic==2.9.2' 'pydantic-core==2.23.4' --no-build-isolation --user --break-system-packages && pip3 install moviebox-api --no-deps --user --break-system-packages && pip3 install rich click bs4 httpx throttlebuster --user --break-system-packages",
+    "build": "npm run setup:python"
   },
   "keywords": ["cymor", "movie-api", "streaming", "moviebox", "kenya"],
   "author": "Legendary Smiley Cymor <cymortechservices@gmail.com>",
