@@ -1,233 +1,210 @@
 #!/usr/bin/env python3
 """
-Cymor Movie API — Python Bridge
-================================
-This script is the integration layer between the Node.js backend and the
-moviebox-api Python library. It reads a JSON command from stdin and writes
-a JSON response to stdout.
+Cymor Movie API — Python Bridge (v2)
+=====================================
+Wraps moviebox_api.v2 and responds to JSON commands via stdin/stdout.
 
 Protocol:
   Input  (stdin):  {"action": "search", "params": {"query": "avatar", "type": "movie"}}
-  Output (stdout): {"success": true, "data": {...}}  or  {"success": false, "error": "..."}
-
-This bridge is spawned by Node.js on-demand using child_process.spawn.
+  Output (stdout): {"success": true, "data": {...}}
 """
 
 import sys
 import json
 import asyncio
-import traceback
 
 
-def send_response(success: bool, data=None, error: str = None):
-    """Write a JSON response to stdout and exit."""
-    response = {"success": success}
+def send(success, data=None, error=None):
+    out = {"success": success}
     if data is not None:
-        response["data"] = data
+        out["data"] = data
     if error is not None:
-        response["error"] = error
-    print(json.dumps(response, default=str), flush=True)
+        out["error"] = error
+    print(json.dumps(out, default=str), flush=True)
 
 
-def serialize_model(obj):
-    """Recursively serialize Pydantic models and common types to dicts."""
+def to_dict(obj):
+    """Recursively convert Pydantic models / dataclasses to plain dicts."""
     if obj is None:
         return None
-    if hasattr(obj, "model_dump"):
-        return obj.model_dump()
-    if hasattr(obj, "__dict__"):
-        return {k: serialize_model(v) for k, v in obj.__dict__.items() if not k.startswith("_")}
+    if isinstance(obj, (str, int, float, bool)):
+        return obj
     if isinstance(obj, (list, tuple)):
-        return [serialize_model(i) for i in obj]
+        return [to_dict(i) for i in obj]
     if isinstance(obj, dict):
-        return {k: serialize_model(v) for k, v in obj.items()}
-    return obj
+        return {k: to_dict(v) for k, v in obj.items()}
+    if hasattr(obj, "model_dump"):
+        return to_dict(obj.model_dump())
+    if hasattr(obj, "__dict__"):
+        return {k: to_dict(v) for k, v in obj.__dict__.items() if not k.startswith("_")}
+    return str(obj)
 
 
-async def handle_search(params: dict) -> dict:
-    """Search for movies, TV series, or all content."""
-    from moviebox_api.v1.core import Search, Session, SubjectType
+# ── Handlers ──────────────────────────────────────────────────────────────────
 
-    query = params.get("query", "")
-    content_type = params.get("type", "all")  # movie | series | all
-    page = params.get("page", 1)
-    per_page = params.get("per_page", 20)
+async def handle_search(params):
+    from moviebox_api.v2 import MovieSearch, TVSeriesSearch
 
+    query = params.get("query", "").strip()
+    content_type = params.get("type", "all")
     if not query:
-        raise ValueError("Search query is required")
+        raise ValueError("query is required")
 
-    session = Session()
     results = []
 
-    async def search_type(subject_type, label):
-        s = Search(session, query=query, subject_type=subject_type, page=page, per_page=per_page)
-        raw = await s.get_content()
-        items = raw.get("items", []) if isinstance(raw, dict) else []
-        pager = raw.get("pager", {}) if isinstance(raw, dict) else {}
-        serialized = []
-        for item in items:
-            serialized.append({
-                "id": getattr(item, "id", None) or (item.get("id") if isinstance(item, dict) else None),
-                "title": getattr(item, "title", None) or (item.get("title") if isinstance(item, dict) else None),
-                "year": getattr(item, "year", None) or (item.get("year") if isinstance(item, dict) else None),
-                "poster": getattr(item, "poster_url", None) or (item.get("poster_url") if isinstance(item, dict) else None),
-                "page_url": getattr(item, "page_url", None) or (item.get("page_url") if isinstance(item, dict) else None),
-                "content_type": label,
-                "_raw": serialize_model(item),
-            })
-        return serialized, pager
+    if content_type in ("movie", "all"):
+        try:
+            ms = MovieSearch(query)
+            movies = await ms.results()
+            for m in (movies or []):
+                d = to_dict(m)
+                d["content_type"] = "movie"
+                results.append(d)
+        except Exception as e:
+            pass  # Don't fail entirely if movies fail
 
-    if content_type == "movie":
-        items, pager = await search_type(SubjectType.MOVIES, "movie")
-    elif content_type == "series":
-        items, pager = await search_type(SubjectType.TV_SERIES, "series")
-    else:
-        movie_items, movie_pager = await search_type(SubjectType.MOVIES, "movie")
-        series_items, series_pager = await search_type(SubjectType.TV_SERIES, "series")
-        items = movie_items + series_items
-        pager = movie_pager
+    if content_type in ("series", "all"):
+        try:
+            ts = TVSeriesSearch(query)
+            series = await ts.results()
+            for s in (series or []):
+                d = to_dict(s)
+                d["content_type"] = "series"
+                results.append(d)
+        except Exception as e:
+            pass
 
-    return {"items": items, "pager": serialize_model(pager), "query": query, "content_type": content_type}
+    return {"items": results, "query": query, "content_type": content_type}
 
 
-async def handle_movie_details(params: dict) -> dict:
-    """Get full details for a movie by page_url."""
-    from moviebox_api.v1 import MovieDetails, Session
+async def handle_movie_details(params):
+    from moviebox_api.v2 import Movie
 
-    page_url = params.get("page_url")
-    if not page_url:
-        raise ValueError("page_url is required")
+    title = params.get("title") or params.get("query")
+    year = params.get("year")
+    if not title:
+        raise ValueError("title is required")
 
-    session = Session()
-    md = MovieDetails(page_url, session=session)
-    details = await md.get_content_model()
-    return serialize_model(details)
-
-
-async def handle_series_details(params: dict) -> dict:
-    """Get full details for a TV series by page_url."""
-    from moviebox_api.v1 import TVSeriesDetails, Session
-
-    page_url = params.get("page_url")
-    if not page_url:
-        raise ValueError("page_url is required")
-
-    session = Session()
-    details_inst = TVSeriesDetails(page_url, session=session)
-    details = await details_inst.get_content_model()
-    return serialize_model(details)
+    m = Movie(title, year=year)
+    details = await m.get_info()
+    return to_dict(details)
 
 
-async def handle_movie_downloads(params: dict) -> dict:
-    """Get downloadable file links for a movie."""
-    from moviebox_api.v1 import DownloadableMovieFilesDetail, MovieDetails, Session
+async def handle_series_details(params):
+    from moviebox_api.v2 import TVSeries
 
-    page_url = params.get("page_url")
-    if not page_url:
-        raise ValueError("page_url is required")
+    title = params.get("title") or params.get("query")
+    year = params.get("year")
+    if not title:
+        raise ValueError("title is required")
 
-    session = Session()
-    md = MovieDetails(page_url, session=session)
-    details_model = await md.get_content_model()
-
-    dl_files = DownloadableMovieFilesDetail(session, details_model)
-    dl_detail = await dl_files.get_content_model()
-
-    downloads = serialize_model(dl_detail.downloads) if hasattr(dl_detail, "downloads") else []
-    captions = serialize_model(dl_detail.captions) if hasattr(dl_detail, "captions") else []
-
-    return {"downloads": downloads, "captions": captions}
+    s = TVSeries(title, year=year)
+    details = await s.get_info()
+    return to_dict(details)
 
 
-async def handle_series_downloads(params: dict) -> dict:
-    """Get downloadable file links for a TV series episode."""
-    from moviebox_api.v1 import DownloadableTVSeriesFilesDetail, TVSeriesDetails, Session
+async def handle_movie_streams(params):
+    from moviebox_api.v2 import Movie
 
-    page_url = params.get("page_url")
-    season = params.get("season", 1)
-    episode = params.get("episode", 1)
+    title = params.get("title") or params.get("query")
+    year = params.get("year")
+    quality = params.get("quality", "1080p")
+    if not title:
+        raise ValueError("title is required")
 
-    if not page_url:
-        raise ValueError("page_url is required")
-
-    session = Session()
-    details_inst = TVSeriesDetails(page_url, session=session)
-    details_model = await details_inst.get_content_model()
-
-    dl_files = DownloadableTVSeriesFilesDetail(session, details_model)
-    dl_detail = await dl_files.get_content_model(season=int(season), episode=int(episode))
-
-    downloads = serialize_model(dl_detail.downloads) if hasattr(dl_detail, "downloads") else []
-    captions = serialize_model(dl_detail.captions) if hasattr(dl_detail, "captions") else []
-
-    return {"downloads": downloads, "captions": captions, "season": season, "episode": episode}
+    m = Movie(title, year=year)
+    files = await m.get_files(quality=quality)
+    captions = await m.get_captions()
+    return {
+        "downloads": to_dict(files) if files else [],
+        "captions": to_dict(captions) if captions else [],
+    }
 
 
-async def handle_homepage(params: dict) -> dict:
-    """Get homepage content (trending/popular items)."""
-    from moviebox_api.v1.core import Search, Session, SubjectType
+async def handle_series_streams(params):
+    from moviebox_api.v2 import TVSeries
 
-    session = Session()
+    title = params.get("title") or params.get("query")
+    season = int(params.get("season", 1))
+    episode = int(params.get("episode", 1))
+    year = params.get("year")
+    if not title:
+        raise ValueError("title is required")
 
-    async def fetch(subject_type, limit=10):
-        s = Search(session, query="", subject_type=subject_type, per_page=limit)
-        raw = await s.get_content()
-        items = raw.get("items", []) if isinstance(raw, dict) else []
-        return [serialize_model(i) for i in items[:limit]]
+    s = TVSeries(title, year=year)
+    files = await s.get_files(season=season, episode=episode)
+    captions = await s.get_captions(season=season, episode=episode)
+    return {
+        "downloads": to_dict(files) if files else [],
+        "captions": to_dict(captions) if captions else [],
+        "season": season,
+        "episode": episode,
+    }
 
-    movies = await fetch(SubjectType.MOVIES, 10)
-    series = await fetch(SubjectType.TV_SERIES, 10)
+
+async def handle_homepage(params):
+    from moviebox_api.v2 import MovieSearch, TVSeriesSearch
+
+    movies, series = [], []
+    try:
+        ms = MovieSearch("the")
+        movies = to_dict(await ms.results()) or []
+    except:
+        pass
+    try:
+        ts = TVSeriesSearch("the")
+        series = to_dict(await ts.results()) or []
+    except:
+        pass
+
+    for m in movies: m["content_type"] = "movie"
+    for s in series: s["content_type"] = "series"
 
     return {
-        "trending_movies": movies,
-        "trending_series": series,
+        "trending_movies": movies[:10],
+        "trending_series": series[:10],
         "featured": (movies + series)[:6],
     }
 
 
-# ─── Action Router ───────────────────────────────────────────────────────────
+# ── Router ────────────────────────────────────────────────────────────────────
 
 ACTIONS = {
     "search": handle_search,
     "movie_details": handle_movie_details,
     "series_details": handle_series_details,
-    "movie_downloads": handle_movie_downloads,
-    "series_downloads": handle_series_downloads,
+    "movie_streams": handle_movie_streams,
+    "series_streams": handle_series_streams,
+    "movie_downloads": handle_movie_streams,   # alias
+    "series_downloads": handle_series_streams, # alias
     "homepage": handle_homepage,
 }
 
 
 async def main():
-    raw_input = sys.stdin.read().strip()
-    if not raw_input:
-        send_response(False, error="No input received")
+    raw = sys.stdin.read().strip()
+    if not raw:
+        send(False, error="No input")
         return
-
     try:
-        command = json.loads(raw_input)
-    except json.JSONDecodeError as e:
-        send_response(False, error=f"Invalid JSON input: {e}")
+        cmd = json.loads(raw)
+    except Exception as e:
+        send(False, error=f"Invalid JSON: {e}")
         return
 
-    action = command.get("action")
-    params = command.get("params", {})
-
-    if not action:
-        send_response(False, error="'action' field is required")
-        return
+    action = cmd.get("action")
+    params = cmd.get("params", {})
 
     handler = ACTIONS.get(action)
     if not handler:
-        send_response(False, error=f"Unknown action: '{action}'. Valid actions: {list(ACTIONS.keys())}")
+        send(False, error=f"Unknown action: {action}. Valid: {list(ACTIONS)}")
         return
 
     try:
         result = await handler(params)
-        send_response(True, data=result)
-    except ValueError as e:
-        send_response(False, error=str(e))
+        send(True, data=result)
     except Exception as e:
-        send_response(False, error=f"{type(e).__name__}: {str(e)}")
+        send(False, error=f"{type(e).__name__}: {e}")
 
 
 if __name__ == "__main__":
